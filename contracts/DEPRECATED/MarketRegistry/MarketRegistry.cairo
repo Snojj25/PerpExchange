@@ -60,10 +60,30 @@ func add_pool{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_ptr}(
 // VIEW FUNCTIONS ==========================================
 
 @view
+func get_market_info{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_ptr}(
+    base_token: felt
+) -> felt {
+    let (pool_addr: felt) = _pool_map.read(base_token);
+    let (exchange_fee_ratio: felt) = _exchange_fee_ratio.read(base_token);
+    let (uniswap_fee_ratio: felt) = _uniswap_fee_ratio.read(base_token);
+    let (insurance_fund_fee_ratio: felt) = _insurance_fund_fee_ratio_map.read(base_token);
+
+    return MarketInfo(pool_addr, exchange_fee_ratio, uniswap_fee_ratio, insurance_fund_fee_ratio);
+}
+
+@view
 func get_pool{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_ptr}(
     base_token: felt
 ) -> felt {
     let (pool_addr: felt) = _pool_map.read(base_token);
 
     return pool_addr;
+}
+
+// STRUCTS ================================================
+struct MarketInfo {
+    pool: felt,
+    exchange_fee_ratio: felt,
+    uniswap_fee_ratio: felt,
+    insurance_fund_fee_ratio: felt,
 }

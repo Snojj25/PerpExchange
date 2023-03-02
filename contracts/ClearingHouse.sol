@@ -1,131 +1,145 @@
- /// @inheritdoc IOrderBook
-    function removeLiquidity(RemoveLiquidityParams calldata params)
-        external
-        override
-        returns (RemoveLiquidityResponse memory)
-    {
-        _requireOnlyClearingHouse();
-        address pool = IMarketRegistry(_marketRegistry).getPool(params.baseToken);
-        bytes32 orderId = OpenOrder.calcOrderKey(params.maker, params.baseToken, params.lowerTick, params.upperTick);
-        return
-            _removeLiquidity(
-                InternalRemoveLiquidityParams({
-                    maker: params.maker,
-                    baseToken: params.baseToken,
-                    pool: pool,
-                    orderId: orderId,
-                    lowerTick: params.lowerTick,
-                    upperTick: params.upperTick,
-                    liquidity: params.liquidity
-                })
-            );
+function _openPositionFor(address trader, OpenPositionParams memory params)
+    internal
+    returns (
+        uint256 base,
+        uint256 quote,
+        uint256 fee
+    )
+{
+    // input requirement checks:
+    //   baseToken: in Exchange.settleFunding()
+    //   isBaseToQuote & isExactInput: X
+    //   amount: in UniswapV3Pool.swap()
+    //   oppositeAmountBound: in _checkSlippage()
+    //   deadline: here
+    //   sqrtPriceLimitX96: X (this is not for slippage protection)
+    //   referralCode: X
+
+    _checkMarketOpen(params.baseToken);
+
+    // register token if it's the first time
+    _registerBaseToken(trader, params.baseToken);
+
+    // must settle funding first
+    _settleFunding(trader, params.baseToken);
+
+    IExchange.SwapResponse memory response = _openPosition(
+        InternalOpenPositionParams({
+            trader: trader,
+            baseToken: params.baseToken,
+            isBaseToQuote: params.isBaseToQuote,
+            isExactInput: params.isExactInput,
+            amount: params.amount,
+            isClose: false,
+            sqrtPriceLimitX96: params.sqrtPriceLimitX96
+        })
+    );
+
+    _checkSlippage(
+        InternalCheckSlippageParams({
+            isBaseToQuote: params.isBaseToQuote,
+            isExactInput: params.isExactInput,
+            base: response.base,
+            quote: response.quote,
+            oppositeAmountBound: params.oppositeAmountBound
+        })
+    );
+
+    _referredPositionChanged(params.referralCode);
+
+    return (response.base, response.quote, response.fee);
+}
+
+//
+
+//
+
+//
+
+//
+
+//
+
+/// @dev explainer diagram for the relationship between exchangedPositionNotional, fee and openNotional:
+///      https://www.figma.com/file/xuue5qGH4RalX7uAbbzgP3/swap-accounting-and-events
+function _openPosition(InternalOpenPositionParams memory params)
+    internal
+    returns (IExchange.SwapResponse memory)
+{
+    IExchange.SwapResponse memory response = IExchange(_exchange).swap(
+        IExchange.SwapParams({
+            trader: params.trader,
+            baseToken: params.baseToken,
+            isBaseToQuote: params.isBaseToQuote,
+            isExactInput: params.isExactInput,
+            isClose: params.isClose,
+            amount: params.amount,
+            sqrtPriceLimitX96: params.sqrtPriceLimitX96
+        })
+    );
+
+    _modifyOwedRealizedPnl(
+        _insuranceFund,
+        response.insuranceFundFee.toInt256()
+    );
+
+    // examples:
+    // https://www.figma.com/file/xuue5qGH4RalX7uAbbzgP3/swap-accounting-and-events?node-id=0%3A1
+    _settleBalanceAndDeregister(
+        params.trader,
+        params.baseToken,
+        response.exchangedPositionSize,
+        response.exchangedPositionNotional.sub(response.fee.toInt256()),
+        response.pnlToBeRealized,
+        0
+    );
+
+    if (response.pnlToBeRealized != 0) {
+        // if realized pnl is not zero, that means trader is reducing or closing position
+        // trader cannot reduce/close position if the remaining account value is less than
+        // accountValue * LiquidationPenaltyRatio, which
+        // enforces traders to keep LiquidationPenaltyRatio of accountValue to
+        // shore the remaining positions and make sure traders having enough money to pay liquidation penalty.
+
+        // CH_NEMRM : not enough minimum required margin after reducing/closing position
+        require(
+            getAccountValue(params.trader) >=
+                _getTotalAbsPositionValue(params.trader)
+                    .mulRatio(_getLiquidationPenaltyRatio())
+                    .toInt256(),
+            "CH_NEMRM"
+        );
     }
 
-///
-///
-///
-///
-
-
-function _removeLiquidity(InternalRemoveLiquidityParams memory params)
-        internal
-        returns (RemoveLiquidityResponse memory)
-    {
-        UniswapV3Broker.RemoveLiquidityResponse memory response =
-            UniswapV3Broker.removeLiquidity(
-                UniswapV3Broker.RemoveLiquidityParams(
-                    params.pool,
-                    _clearingHouse,
-                    params.lowerTick,
-                    params.upperTick,
-                    params.liquidity
-                )
-            );
-
-        // update token info based on existing open order
-        (uint256 fee, uint256 baseDebt, uint256 quoteDebt) = _removeLiquidityFromOrder(params);
-
-        int256 takerBase = response.base.toInt256().sub(baseDebt.toInt256());
-        int256 takerQuote = response.quote.toInt256().sub(quoteDebt.toInt256());
-
-        // if flipped from initialized to uninitialized, clear the tick info
-        if (!UniswapV3Broker.getIsTickInitialized(params.pool, params.lowerTick)) {
-            _growthOutsideTickMap[params.baseToken].clear(params.lowerTick);
-        }
-        if (!UniswapV3Broker.getIsTickInitialized(params.pool, params.upperTick)) {
-            _growthOutsideTickMap[params.baseToken].clear(params.upperTick);
-        }
-
-        return
-            RemoveLiquidityResponse({
-                base: response.base,
-                quote: response.quote,
-                fee: fee,
-                takerBase: takerBase,
-                takerQuote: takerQuote
-            });
+    // check margin ratio after swap: mmRatio for closing position; else, imRatio
+    if (params.isClose) {
+        // CH_NEFCM: not enough free collateral by mmRatio
+        require(
+            (_getFreeCollateralByRatio(
+                params.trader,
+                IClearingHouseConfig(_clearingHouseConfig).getMmRatio()
+            ) >= 0),
+            "CH_NEFCM"
+        );
+    } else {
+        _requireEnoughFreeCollateral(params.trader);
     }
 
+    // openNotional will be zero if baseToken is deregistered from trader's token list.
+    int256 openNotional = _getTakerOpenNotional(
+        params.trader,
+        params.baseToken
+    );
+    _emitPositionChanged(
+        params.trader,
+        params.baseToken,
+        response.exchangedPositionSize,
+        response.exchangedPositionNotional,
+        response.fee,
+        openNotional,
+        response.pnlToBeRealized, // realizedPnl
+        response.sqrtPriceAfterX96
+    );
 
-
-
-
-    function _removeLiquidityFromOrder(InternalRemoveLiquidityParams memory params)
-        internal
-        returns (
-            uint256 fee,
-            uint256 baseDebt,
-            uint256 quoteDebt
-        )
-    {
-        // update token info based on existing open order
-        OpenOrder.Info storage openOrder = _openOrderMap[params.orderId];
-
-        // as in _addLiquidityToOrder(), fee should be calculated before the states are updated
-        uint256 feeGrowthInsideX128;
-        (fee, feeGrowthInsideX128) = _getPendingFeeAndFeeGrowthInsideX128ByOrder(params.baseToken, openOrder);
-
-        if (params.liquidity != 0) {
-            if (openOrder.baseDebt != 0) {
-                baseDebt = FullMath.mulDiv(openOrder.baseDebt, params.liquidity, openOrder.liquidity);
-                openOrder.baseDebt = openOrder.baseDebt.sub(baseDebt);
-            }
-            if (openOrder.quoteDebt != 0) {
-                quoteDebt = FullMath.mulDiv(openOrder.quoteDebt, params.liquidity, openOrder.liquidity);
-                openOrder.quoteDebt = openOrder.quoteDebt.sub(quoteDebt);
-            }
-            openOrder.liquidity = openOrder.liquidity.sub(params.liquidity).toUint128();
-        }
-
-        // after the fee is calculated, lastFeeGrowthInsideX128 can be updated if liquidity != 0 after removing
-        if (openOrder.liquidity == 0) {
-            _removeOrder(params.maker, params.baseToken, params.orderId);
-        } else {
-            openOrder.lastFeeGrowthInsideX128 = feeGrowthInsideX128;
-        }
-
-        return (fee, baseDebt, quoteDebt);
-    }
-
-
-
-        function _removeOrder(
-        address maker,
-        address baseToken,
-        bytes32 orderId
-    ) internal {
-        bytes32[] storage orderIds = _openOrderIdsMap[maker][baseToken];
-        uint256 orderLen = orderIds.length;
-        for (uint256 idx = 0; idx < orderLen; idx++) {
-            if (orderIds[idx] == orderId) {
-                // found the existing order ID
-                // remove it from the array efficiently by re-ordering and deleting the last element
-                if (idx != orderLen - 1) {
-                    orderIds[idx] = orderIds[orderLen - 1];
-                }
-                orderIds.pop();
-                delete _openOrderMap[orderId];
-                break;
-            }
-        }
-    }
+    return response;
+}
