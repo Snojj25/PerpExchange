@@ -56,10 +56,7 @@ func update_position{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check
     prev_is_long: felt,
     new_is_long: felt,
 ) {
-
-
     if (prev_is_long == new_is_long) {
-
         let (position: PositionInfo) = PositionInfo(
             position_size=updated_size,
             entry_price=updated_entry_price,
@@ -67,19 +64,10 @@ func update_position{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check
             is_long=new_is_long,
         );
 
-
-        position_info_s.write(
-            trader=trader, base_token=base_token, value=position
-        );
-
+        position_info_s.write(trader=trader, base_token=base_token, value=position);
     } else {
-
-    let cond = is_le(prev);
-    
-    
-    
+        let cond = is_le(prev);
     }
-
 
     let (position: PositionInfo) = position_info_s.write(
         trader=trader, base_token=base_token, value=new_position
@@ -112,6 +100,24 @@ func register_base_token{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_c
 }
 
 @external
+func deregister_base_token{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_ptr}(
+    trader: felt, base_token: felt
+) {
+    // _requireOnlyClearingHouse();
+
+    let (base_tokens_len: felt, base_tokens: felt*) = _base_tokens_map.read(addr=trader);
+
+    let (empty_arr: felt*) = alloc();
+    let (new_tokens_len: felt, new_tokens: felt*) = _remove_base_token(
+        base_tokens_len, base_tokens, 0, empty_arr, base_token
+    );
+
+    _base_tokens_map.write(addr=trader, value=(new_base_tokens_len, new_tokens));
+
+    return ();
+}
+
+@external
 func modify_realized_pnl{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_ptr}(
     trader: felt, amount: felt
 ) {
@@ -137,12 +143,12 @@ func withdrawal{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_ptr}
 // VIEW FUNCTIONS =========================================
 
 @view
-func get_position_size{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_ptr}(
+func get_position{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_ptr}(
     trader: felt, base_token: felt
-) -> felt {
+) -> (position: PositionInfo) {
     let (position: PositionInfo) = position_info_s.read(trader, base_token);
 
-    return position.position_size;
+    return position;
 }
 
 @view
@@ -257,4 +263,32 @@ func _has_base_token{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check
     }
 
     return _has_base_token(base_tokens_len - 1, &base_tokens[1], base_token);
+}
+
+func _remove_base_token{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_ptr}(
+    base_tokens_len: felt,
+    base_tokens: felt*,
+    new_tokens_len: felt,
+    new_tokens: felt*,
+    base_token: felt,
+) -> (new_tokens_len: felt, new_tokens: felt*) {
+    if (base_tokens_len == 0) {
+        return (new_tokens_len, new_tokens);
+    }
+
+    let ti = base_tokens[0];
+
+    if (ti == base_token) {
+        return _remove_base_token(
+            base_tokens_len - 1, &base_tokens[1], new_tokens_len, new_tokens, base_token
+        );
+    } else {
+        assert base_tokens[base_tokens_len] = base_token;
+
+        return _remove_base_token(
+            base_tokens_len - 1, &base_tokens[1], new_tokens_len + 1, new_tokens, base_token
+        );
+    }
+
+    return _remove_base_token(base_tokens_len - 1, &base_tokens[1], base_token);
 }

@@ -43,10 +43,6 @@ func IM_ratio(token: felt) -> (res: felt) {
 func MM_ratio(token: felt) -> (res: felt) {
 }
 
-@storage_var
-func last_funding_index_s() -> (res: felt) {
-}
-
 // CONSTRUCTOR ============================================
 @constructor
 func constructor(IM_ratio: felt, MM_ratio: felt) {

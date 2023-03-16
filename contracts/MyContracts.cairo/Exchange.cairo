@@ -16,7 +16,7 @@ func exchange_config_s() -> (address: felt) {
 func vault_s() -> (address: felt) {
 }
 @storage_var
-func _account_balance() -> (address: felt) {
+func account_registry_s() -> (address: felt) {
 }
 @storage_var
 func _insurance_fund() -> (address: felt) {
@@ -86,16 +86,18 @@ func open_position{pedersen_ptr: HashBuiltin*}(swap_params: SwapParams) -> () {
     let trader = get_caller_address();
 
     // register token if it's the first time
-    let account_balance_addr = _account_balance.read();
-    IAccountBalance.register_base_token(
-        contract_address=account_balance_addr, trader=trader, base_token=swap_params.baseToken
+    let account_registry_addr = account_registry_s.read();
+    IAccountRegistry.register_base_token(
+        contract_address=account_registry_addr, trader=trader, base_token=swap_params.baseToken
     );
 
     let expected_quote_amount = get_estimated_quote_amount(
         base_amount=swap_params.amount, base_token=swap_params.baseToken, is_long=swap_params.isLong
     );
 
-    // let prev_position =
+    let prev_position = IAccountRegistry.get_position(
+        contract_address=account_registry_addr, trader=trader, base_token=swap_params.baseToken
+    );
     // let current_funding_index =
     // Todo: Apply funding to all positions
     // Todo: Update realized PnL
@@ -139,7 +141,6 @@ func open_position{pedersen_ptr: HashBuiltin*}(swap_params: SwapParams) -> () {
 }
 
 // HELPERS ===============================================
-@external
 func execute_swap{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_ptr}(
     swap_params: SwapParams
 ) -> (quote_amount: Uint256) {
@@ -279,6 +280,9 @@ func get_position_effect_type{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, ra
         }
     }
 }
+
+
+// HELPER HELPERS =========================================
 
 func _get_estimated_new_nominal{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_ptr}(
     nominal_value: felt, position_size: felt, swap_params: felt, position_effect_type: felt
